@@ -56,7 +56,7 @@ st.markdown("""
         font-size: 0.9rem;
     }
     .user-card {
-        background-color: #e3f2fd;
+        background-color: #262730;
         border-left: 5px solid #1E3A8A;
         padding: 10px;
         margin: 5px 0;
@@ -74,7 +74,7 @@ st.markdown("""
     .due-tomorrow { background-color: #e8f5e9; color: #2e7d32; }
     .due-advanced { background-color: #e3f2fd; color: #1565c0; }
     .stage-card {
-        background-color: white;
+        background-color: black;
         border-radius: 8px;
         padding: 15px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
@@ -113,8 +113,8 @@ def load_data(uploaded_file=None):
     """
     if uploaded_file is not None:
         try:
-            # Get sheet names
-            excel_file = pd.ExcelFile(uploaded_file)
+            # Get sheet names — always specify engine='openpyxl' for .xlsx byte streams
+            excel_file = pd.ExcelFile(uploaded_file, engine='openpyxl')
             sheet_names = excel_file.sheet_names
             
             # Initialize dataframes
@@ -125,15 +125,15 @@ def load_data(uploaded_file=None):
             for i, sheet_name in enumerate(sheet_names):
                 sheet_lower = sheet_name.lower()
                 if 'sheet1' in sheet_lower or i == 0:
-                    sheet1_df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
+                    sheet1_df = pd.read_excel(uploaded_file, sheet_name=sheet_name, engine='openpyxl')
                 elif 'report' in sheet_lower or i == 1:
-                    sheet2_df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
+                    sheet2_df = pd.read_excel(uploaded_file, sheet_name=sheet_name, engine='openpyxl')
             
             # If sheets not found by name, use by position
             if sheet1_df is None and len(sheet_names) > 0:
-                sheet1_df = pd.read_excel(uploaded_file, sheet_name=sheet_names[0])
+                sheet1_df = pd.read_excel(uploaded_file, sheet_name=sheet_names[0], engine='openpyxl')
             if sheet2_df is None and len(sheet_names) > 1:
-                sheet2_df = pd.read_excel(uploaded_file, sheet_name=sheet_names[1])
+                sheet2_df = pd.read_excel(uploaded_file, sheet_name=sheet_names[1], engine='openpyxl')
             
             # Clean and process sheet1 (for inflow data only)
             sheet1_clean = process_sheet1(sheet1_df)
@@ -196,22 +196,23 @@ def process_sheet2(df):
     df.columns = [str(col).strip() for col in df.columns]
     
     # Create a mapping of possible column names
+    # Keys use underscores to match all downstream column checks
     column_mapping = {
-        'Actual': ['Actual', 'Actual Date', 'actual', 'actual_date'],
+        'Actual_Date': ['Actual', 'Actual Date', 'actual', 'actual_date'],
         'Journal': ['Journal', 'journal', 'JOURNAL'],
-        'Article/Vol/Iss': ['Article/Vol/Iss', 'Article', 'article', 'vol_iss'],
+        'Article': ['Article/Vol/Iss', 'Article', 'article', 'vol_iss'],
         'Team': ['Team', 'team', 'TEAM'],
         'Department': ['Department', 'dept', 'DEPT'],
         'Stage': ['Stage', 'stage', 'STAGE'],
         'Process': ['Process', 'process', 'PROCESS'],
-        'Assigned To': ['Assigned To', 'Assigned', 'assigned_to'],
+        'Assigned_To': ['Assigned To', 'Assigned', 'assigned_to'],
         'Status': ['Status', 'status', 'STATUS'],
-        'Task Status': ['Task Status', 'Task_Status', 'task_status'],
-        'Held Reason': ['Held Reason', 'Held_Reason', 'held_reason'],
-        'Remaining Days': ['Remaining Days', 'Remaining_Days', 'remaining_days'],
-        'Assigned Date': ['Assigned Date', 'Assigned_Date', 'assigned_date'],
-        'Due Date': ['Due Date', 'Due_Date', 'due_date'],
-        'Available Date': ['Available Date', 'Available_Date', 'available_date']
+        'Task_Status': ['Task Status', 'Task_Status', 'task_status'],
+        'Held_Reason': ['Held Reason', 'Held_Reason', 'held_reason'],
+        'Remaining_Days': ['Remaining Days', 'Remaining_Days', 'remaining_days'],
+        'Assigned_Date': ['Assigned Date', 'Assigned_Date', 'assigned_date'],
+        'Due_Date': ['Due Date', 'Due_Date', 'due_date'],
+        'Available_Date': ['Available Date', 'Available_Date', 'available_date']
     }
     
     # Find actual column names in the dataframe
@@ -338,11 +339,18 @@ def process_sheet2(df):
         result_df['Held_Status'] = 'Unknown'
     
     # Fill NA values
+    # IMPORTANT: datetime columns must keep NaT (not be filled with strings)
+    # so that .dt accessor continues to work downstream
     for col in result_df.columns:
-        if result_df[col].dtype in ['datetime64[ns]', 'object']:
-            result_df[col] = result_df[col].fillna('Unknown' if col not in ['Remaining_Days', 'Held_Days', 'Days_Since_Available'] else 0)
-        else:
-            result_df[col] = result_df[col].fillna(0)
+        try:
+            if hasattr(result_df[col], 'dt') and str(result_df[col].dtype) == 'datetime64[ns]':
+                pass  # Keep NaT for datetime columns
+            elif result_df[col].dtype == 'object':
+                result_df[col] = result_df[col].fillna('Unknown')
+            else:
+                result_df[col] = result_df[col].fillna(0)
+        except Exception:
+            pass
     
     # Clean up Status values
     if 'Status' in result_df.columns:
@@ -437,12 +445,16 @@ def create_kpi_metrics(sheet2_df):
         (sheet2_df['Remaining_Days'] >= 0)
     ])
     
-    # New inflow today (based on Available Date)
+    # New inflow today (based on Available Date) - dynamic today
     if 'Available_Date' in sheet2_df.columns:
-        new_inflow_today = len(sheet2_df[
-            (sheet2_df['Available_Date'].dt.date == datetime(2026, 2, 23).date()) &
-            (sheet2_df['Status'] == 'Available')
-        ])
+        today_ts = pd.Timestamp.today().normalize()
+        try:
+            new_inflow_today = len(sheet2_df[
+                (sheet2_df['Available_Date'].dt.normalize() == today_ts) &
+                (sheet2_df['Status'] == 'Available')
+            ])
+        except Exception:
+            new_inflow_today = 0
     else:
         new_inflow_today = 0
     
@@ -1142,7 +1154,7 @@ def main():
                             <p style="font-size: 1.5rem; font-weight: bold; margin:0;">{row['Total_Assigned']}</p>
                             <p style="font-size: 0.8rem; color: #6c757d;">assigned articles {overdue_badge}</p>
                             <p style="font-size: 0.8rem;">Processes: {row['Unique_Processes']} | Stages: {row['Unique_Stages']}</p>
-                            <p style="font-size: 0.8rem; background: #e8f0fe; padding: 3px; border-radius: 3px;">
+                            <p style="font-size: 0.8rem; background: #333; padding: 3px; border-radius: 3px;">
                                 Top: {row['Top_Processes']}
                             </p>
                         </div>
@@ -1192,9 +1204,12 @@ def main():
             if 'Remaining_Days' in display_df.columns:
                 display_df['Due_Indicator'] = display_df['Remaining_Days'].apply(format_remaining_days)
             
-            # Format Available Date
+            # Format Available Date (handle NaT gracefully)
             if 'Available_Date' in display_df.columns:
-                display_df['Available_Date'] = display_df['Available_Date'].dt.strftime('%Y-%m-%d')
+                try:
+                    display_df['Available_Date'] = display_df['Available_Date'].dt.strftime('%Y-%m-%d').replace({'NaT': ''})
+                except Exception:
+                    display_df['Available_Date'] = display_df['Available_Date'].astype(str).replace({'NaT': ''})
             
             st.dataframe(
                 display_df,
