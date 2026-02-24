@@ -114,7 +114,7 @@ def load_data(uploaded_file=None):
     if uploaded_file is not None:
         try:
             # Get sheet names — always specify engine='openpyxl' for .xlsx byte streams
-            excel_file = pd.ExcelFile(uploaded_file, engine='openpyxl')
+            excel_file = pd.ExcelFile(uploaded_file)
             sheet_names = excel_file.sheet_names
             
             # Initialize dataframes
@@ -268,47 +268,39 @@ def process_sheet2(df):
     today_date = pd.Timestamp.today().normalize()
     result_df['Today'] = today_date
     
-    # CRITICAL: Process Remaining Days column based on exact requirements
-    if 'Remaining_Days' in result_df.columns:
-        # Convert to numeric, coerce errors, fill NaN with 0
-        result_df['Remaining_Days'] = pd.to_numeric(result_df['Remaining_Days'], errors='coerce').fillna(0)
-        
-        # Create due categories based on Remaining Days as per requirements:
-        # Overdue: minus values (< 0)
-        # Due Today: 0
-        # Due Tomorrow: 1
-        # Due in 2 Days: 2 or more (>= 2)
-        conditions = [
-            result_df['Remaining_Days'] < 0,                    # Overdue
-            result_df['Remaining_Days'] == 0,                   # Due Today
-            result_df['Remaining_Days'] == 1,                   # Due Tomorrow
-            result_df['Remaining_Days'] >= 2                    # Due in 2 Days or more
-        ]
-        choices = ['Overdue', 'Today', 'Tomorrow', 'Advanced']
-        
-        result_df['Due_Category'] = np.select(conditions, choices, default='Future')
-        
-        # Also create a simplified status for easy filtering
-        result_df['Due_Status'] = result_df['Due_Category']
+    # CRITICAL: Always recalculate Remaining_Days from Due_Date using today's real date
+    # so that due categories reflect the current day, not the stale value stored in Excel.
+    if 'Due_Date' in result_df.columns and result_df['Due_Date'].notna().any():
+        # Recalculate live from Due_Date column
+        result_df['Remaining_Days'] = (result_df['Due_Date'] - result_df['Today']).dt.days
+        result_df['Remaining_Days'] = result_df['Remaining_Days'].fillna(0).astype(int)
+    elif 'Remaining_Days' in result_df.columns:
+        # Fall back to the Excel value if Due_Date is absent, but still sanitise it
+        result_df['Remaining_Days'] = pd.to_numeric(result_df['Remaining_Days'], errors='coerce').fillna(0).astype(int)
     else:
-        # If Remaining Days column doesn't exist, try to calculate from dates
-        if 'Due_Date' in result_df.columns:
-            result_df['Remaining_Days'] = (result_df['Due_Date'] - result_df['Today']).dt.days
-            result_df['Remaining_Days'] = result_df['Remaining_Days'].fillna(0)
-            
-            conditions = [
-                result_df['Remaining_Days'] < 0,
-                result_df['Remaining_Days'] == 0,
-                result_df['Remaining_Days'] == 1,
-                result_df['Remaining_Days'] >= 2
-            ]
-            choices = ['Overdue', 'Today', 'Tomorrow', 'Advanced']
-            result_df['Due_Category'] = np.select(conditions, choices, default='Future')
-            result_df['Due_Status'] = result_df['Due_Category']
-        else:
-            result_df['Remaining_Days'] = 0
-            result_df['Due_Category'] = 'Unknown'
-            result_df['Due_Status'] = 'Unknown'
+        result_df['Remaining_Days'] = 0
+
+    # Create due categories based on Remaining_Days:
+    # Overdue: negative values (< 0)
+    # Due Today: 0
+    # Due Tomorrow: 1
+    # Advanced: 2 or more (>= 2)
+    conditions = [
+        result_df['Remaining_Days'] < 0,                    # Overdue
+        result_df['Remaining_Days'] == 0,                   # Due Today
+        result_df['Remaining_Days'] == 1,                   # Due Tomorrow
+        result_df['Remaining_Days'] >= 2                    # Due in 2 Days or more
+    ]
+    choices = ['Overdue', 'Today', 'Tomorrow', 'Advanced']
+
+    result_df['Due_Category'] = np.select(conditions, choices, default='Future')
+
+    # Simplified status for easy filtering
+    result_df['Due_Status'] = result_df['Due_Category']
+
+    if result_df['Due_Category'].eq('Future').all() and result_df['Remaining_Days'].eq(0).all():
+        result_df['Due_Category'] = 'Unknown'
+        result_df['Due_Status'] = 'Unknown'
     
     # Calculate Days Since Available for inflow tracking
     if 'Available_Date' in result_df.columns:
